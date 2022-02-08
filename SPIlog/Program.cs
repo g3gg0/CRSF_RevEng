@@ -21,11 +21,10 @@ namespace SPIlog
         {
             get
             {
-                return (RegistersFsk[0] & 0x80) != 0;
+                return (RegistersFsk[1] & 0x80) != 0;
             }
         }
 
-        public static uint[] HopSequence = new uint[] { 0, 6, 28, 11, 39, 23, 17, 9, 37, 1, 48, 38, 31, 3, 49, 46, 25, 15, 44, 8, 27, 47, 24, 2, 29, 10, 43, 40, 26, 42, 7, 4, 19, 33, 12, 5, 36, 22, 45, 14, 20, 35, 32, 13, 16, 30, 21, 0, 18, 28, 11, 41, 23, 17, 34, 37, 1, 6, 38, 31, 39, 49, 46, 9, 15, 44, 48, 27, 47, 3, 2, 29, 25, 43, 40, 8, 42, 7, 24, 19, 33, 10, 5, 36, 26, 45, 14, 4, 35, 32, 12, 16, 30, 22, 0, 18, 20, 11, 41, 13, 17, 34, 21, 1, 6, 28, 31, 39, 23, 46, 9, 37, 44, 48, 38, 47, 3, 49, 29, 25, 15, 40, 8, 27, 7, 24, 2, 33, 10, 43, 36, 26, 42, 14, 4, 19, 32, 12, 5, 30, 22, 45, 18, 20, 35, 41, 13, 16, 34, 21 };
         public static int[] HopSequenceDetected = null;
         public static byte[] RegistersFsk = new byte[255];
         public static byte[] RegistersLora = new byte[255];
@@ -135,7 +134,7 @@ namespace SPIlog
             RegFifoAddrPtr = 0x0D,
             RegFifoTxBaseAddr = 0x0E,
             RegFifoRxBaseAddr = 0x0F,
-            FifoRxCurrentAddr = 0x10,
+            RegFifoRxCurrentAddr = 0x10,
             RegIrqFlagsMask = 0x11,
             RegIrqFlags = 0x12,
             RegRxNbBytes = 0x13,
@@ -454,7 +453,7 @@ namespace SPIlog
 
             SX1272RegsFsk lastFskRegister = 0;
             SX1272RegsLoRa lastLoRaRegister = 0;
-            List<ulong> lastData = new List<ulong>();
+            List<byte> fifoData = new List<byte>();
             bool write = false;
             uint currentRegister = 0;
             int currentHop = 0;
@@ -462,6 +461,7 @@ namespace SPIlog
             int hopsSuccess = 0;
             bool running = true;
             byte fwLastCounter = 0;
+            string fifoWriteLine = null;
 
             DateTime StartTime = DateTime.Now;
             DateTime lastUpdate = DateTime.Now;
@@ -566,310 +566,142 @@ namespace SPIlog
                         /* chip enable */
                         if (type == 0xDE)
                         {
-                            if (write)
+                            bool wasFifo = false;
+
+                            switch (lastFskRegister)
                             {
-                                switch (lastFskRegister)
+                                case SX1272RegsFsk.RegFifo:
+                                    wasFifo = true;
+                                    break;
+                            }
+                            switch (lastLoRaRegister)
+                            {
+                                case SX1272RegsLoRa.RegFifo:
+                                    wasFifo = true;
+                                    break;
+                            }
+
+                            if (wasFifo)
+                            {
+                                ulong frf = GetFrequencyRaw();
+                                int arfcn = FreqToArfcn(frf);
+                                string payload = string.Join(" ", fifoData.Select(d => d.ToString("X2")));
+                                string miss = "@" + currentHop.ToString().PadLeft(3);
+
+                                if (HopSequenceDetected != null)
                                 {
-                                    case SX1272RegsFsk.RegFrfMsb:
-                                        ulong frf = (GetRegister(SX1272RegsFsk.RegFrfMsb) << 16) + (GetRegister(SX1272RegsFsk.RegFrfMid) << 8) + (GetRegister(SX1272RegsFsk.RegFrfLsb) << 0);
+                                    if (arfcn == HopSequenceDetected[currentHop])
+                                    {
+                                        currentHop++;
+                                        hopsSuccess++;
+                                        currentHop %= HopSequenceDetected.Length;
+                                        hopsMissing = 0;
+                                    }
+                                    else
+                                    {
+                                        currentHop = 0;
+                                        currentHop %= HopSequenceDetected.Length;
+                                        hopsMissing++;
+                                        miss = hopsMissing.ToString().PadLeft(4);
+                                        hopsSuccess = 0;
+                                    }
+                                }
 
-                                        /* delay a few ms */
-                                        if ((logReader.BaseStream is FileStream) && sleepDelay > 0)
+                                if (frf != 0 || payload.Length > 0)
+                                {
+                                    byte[] binData = fifoData.Select(d => (byte)d).ToArray();
+                                    bool crc8InitZero = false;
+
+                                    if (binData.Length > 1)
+                                    {
+                                        byte crc = crc8(binData, 0, binData.Length - 1, 0);
+                                        crc8InitZero = (crc == binData[binData.Length - 1]);
+                                    }
+
+                                    string modulationParameters = GetModulationParameters();
+
+                                    if (lastModulationParameters != modulationParameters)
+                                    {
+                                        lastModulationParameters = modulationParameters;
+                                        //Console.WriteLine("Modulation: " + modulationParameters);
+                                    }
+
+                                    fifoWriteLine = ">  " + modulationParameters + " " + arfcn.ToString("00") + " " + miss + " " + (write ? "Tx" : "Rx") + "  " + payload + (crc8InitZero ? "  (CRC8 zero-init)" : "");
+
+                                    if (!write && !IsFsk() && crc8InitZero)
+                                    {
+                                        /* then check for a fw packet 00000101 / 00001101  */
+                                        if ((binData[0] == 0x05) || (binData[0] == 0x0D))
                                         {
-                                            Thread.Sleep(sleepDelay);
+                                            byte len = binData[1];
+                                            byte[] fwData = binData.Skip(2).Take(len).ToArray();
+
+                                            if (fwLastCounter != binData[0])
+                                            {
+                                                fwLastCounter = binData[0];
+                                                //Console.WriteLine("FW>  " + string.Join(" ", fwData.Select(d => d.ToString("X2"))));
+                                            }
                                         }
 
-                                        if (frf != 0)
+                                    }
+                                }
+
+                                if (hopsSuccess > 10 && displayMode == 5)
+                                {
+                                    if (write)
+                                    {
+                                        for (int test_value = 0; test_value < 0x100; test_value++)
                                         {
-                                            int arfcn = FreqToArfcn(frf);
+                                            int pkt_start = 0;
+                                            int pkt_len = 12;
+                                            byte[] buffer = fifoData.Select(d => (byte)d).ToArray();
+                                            byte initValue = (byte)(test_value + hopDownCrc[currentHop / 2]);
 
-                                            LastWrittenFrequenciesBinary.Add(frf);
-
-                                            if (MinFreq != LastWrittenFrequenciesBinary.Min())
+                                            if (crc8(buffer, 0, pkt_start + pkt_len, initValue) == buffer[pkt_start + pkt_len])
                                             {
-                                                MinFreq = LastWrittenFrequenciesBinary.Min();
-                                                HopSequenceDetected = null;
-                                            }
-                                            if (MaxFreq != LastWrittenFrequenciesBinary.Max())
-                                            {
-                                                MaxFreq = LastWrittenFrequenciesBinary.Max();
-                                                HopSequenceDetected = null;
-                                            }
-
-                                            if (LastWrittenFrequenciesBinary.Count > 300)
-                                            {
-                                                /* if the pattern does not repeat, reset the hop list */
-                                                if (LastWrittenFrequenciesBinary.First() != LastWrittenFrequenciesBinary.Last())
-                                                {
-                                                    HopSequenceDetected = null;
-                                                }
-
-                                                /* only update the hop sequence if the current (and first) ARFCN is zero */
-                                                if (HopSequenceDetected == null && arfcn == 0)
-                                                {
-                                                    HopSequenceDetected = LastWrittenFrequenciesBinary.Take(300).Select(v => FreqToArfcn(v)).ToArray();
-                                                }
-
-                                                LastWrittenFrequenciesBinary.RemoveAt(0);
+                                                hopDownCrc[currentHop / 2] = initValue;
+                                                break;
                                             }
                                         }
-                                        break;
+                                    }
+                                    else
+                                    {
+                                        for (int test_value = 0; test_value < 0x10000; test_value++)
+                                        {
+                                            int pkt_start = 0;
+                                            int pkt_len = 21;
+                                            byte[] buffer = fifoData.Select(d => (byte)d).ToArray();
+                                            ushort initValue = (ushort)(test_value + hopUpCrc[currentHop / 2]);
+                                            ushort pktCrc = (ushort)((buffer[pkt_start + pkt_len + 1] << 8) | buffer[pkt_start + pkt_len]);
+
+                                            if (crc16(buffer, 0, pkt_start + pkt_len, initValue) == pktCrc)
+                                            {
+                                                hopUpCrc[currentHop / 2] = initValue;
+                                                break;
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
-                            switch (displayMode)
+                            if(fifoWriteLine != null)
                             {
-                                case 0:
-                                    break;
-
-                                case 1:
-                                    {
-                                        switch (lastLoRaRegister)
-                                        {
-                                            case SX1272RegsLoRa.RegModemConfig2:
-                                                {
-                                                    byte regVal = (byte)GetRegister(SX1272RegsLoRa.RegModemConfig2);
-
-                                                    Console.WriteLine("  => SpreadingFactor  " + (1U << (regVal >> 4)).ToString());
-                                                    Console.WriteLine("  => TxContinuousMode " + ((regVal & (1 << 3)) != 0));
-                                                    Console.WriteLine("  => AgcAutoOn        " + ((regVal & (1 << 2)) != 0));
-                                                    Console.WriteLine("  => SymbTimeout(9:8) " + ((regVal >> 0) & 3).ToString());
-
-                                                }
-                                                break;
-                                        }
-
-                                        switch (lastFskRegister)
-                                        {
-                                            case SX1272RegsFsk.RegFifo:
-                                                {
-                                                    if (LastWrittenFrequenciesBinary.Count == 0)
-                                                    {
-                                                        break;
-                                                    }
-                                                    ulong frf = LastWrittenFrequenciesBinary.Last();
-                                                    int arfcn = FreqToArfcn(frf) % 50;
-
-                                                    string miss = "";
-                                                    if (arfcn == HopSequence[currentHop])
-                                                    {
-                                                        currentHop++;
-                                                        hopsSuccess++;
-                                                        currentHop %= HopSequence.Length;
-                                                        hopsMissing = 0;
-                                                    }
-                                                    else
-                                                    {
-                                                        currentHop += 37;
-                                                        currentHop %= HopSequence.Length;
-                                                        hopsMissing++;
-                                                        miss = ", miss " + hopsMissing + " after " + hopsSuccess;
-                                                        hopsSuccess = 0;
-                                                    }
-
-                                                    Console.WriteLine(">  " + (((GetRegister(SX1272RegsFsk.RegOpMode) & 0x80) == 0) ? "FSK " : "LoRa") + ", " + frf.ToString("X6") + "(" + FreqToMhzString(frf) + "), " + arfcn.ToString("00") + ", " + string.Join(" ", lastData.Select(d => d.ToString("X2"))) + " " + miss);
-                                                }
-                                                break;
-
-                                            case SX1272RegsFsk.RegOpMode:
-                                                Console.WriteLine("  => Mode " + (((GetRegister(SX1272RegsFsk.RegOpMode) & 0x80) == 0) ? "FSK " : "LoRa"));
-                                                break;
-
-                                            case SX1272RegsFsk.RegFrfMsb:
-                                                if (lastData.Count == 3)
-                                                {
-                                                    ulong frf = GetFrequencyRaw();
-                                                    ulong freq = (ulong)(GetFrequency() * 1000000.0m);
-
-                                                    {
-                                                        Frequencies.Add(freq);
-                                                        FrequenciesBinary.Add(frf);
-                                                        FrequenciesLog.Add(new Tuple<double, byte>((DateTime.Now - StartTime).TotalMilliseconds, (byte)((frf - 0xD70AB0) / 4260)));
-
-                                                        if ((FrequenciesBinary.Count % 2) == 0)
-                                                        {
-                                                            int width = FrequenciesBinary.Count / 2;
-
-                                                            var part1 = FrequenciesBinary.Take(width);
-                                                            var part2 = FrequenciesBinary.Skip(width);
-
-                                                            //if(Enumerable.SequenceEqual(part1, part2))
-                                                            {
-                                                                //PrintStatistics();
-                                                            }
-
-                                                        }
-                                                    }
-
-                                                    Console.WriteLine("  => Frequency: " + (freq / 1000) + " kHz");
-                                                }
-                                                break;
-                                        }
+                                switch (displayMode)
+                                {
+                                    case 0:
+                                    case 1:
+                                    case 2:
+                                    case 3:
+                                    case 4:
+                                        Console.WriteLine(fifoWriteLine);
                                         break;
-                                    }
-
-                                case 2:
-                                    {
-                                        switch (lastFskRegister)
-                                        {
-                                            case SX1272RegsFsk.RegFifo:
-                                                {
-                                                    if (LastWrittenFrequenciesBinary.Count == 0)
-                                                    {
-                                                        break;
-                                                    }
-                                                    ulong frf = LastWrittenFrequenciesBinary.Last();
-                                                    int arfcn = FreqToArfcn(frf);
-                                                    string payload = string.Join(" ", lastData.Select(d => d.ToString("X2")));
-
-                                                    string miss = "@" + currentHop.ToString().PadLeft(3);
-                                                    //if (write)
-                                                    {
-                                                        if (arfcn == HopSequence[currentHop])
-                                                        {
-                                                            currentHop++;
-                                                            hopsSuccess++;
-                                                            currentHop %= HopSequence.Length;
-                                                            hopsMissing = 0;
-                                                        }
-                                                        else
-                                                        {
-                                                            currentHop = 0;
-                                                            currentHop %= HopSequence.Length;
-                                                            hopsMissing++;
-                                                            miss = hopsMissing.ToString().PadLeft(4);
-                                                            hopsSuccess = 0;
-                                                        }
-                                                    }
-
-                                                    bool isFsk = ((GetRegister(SX1272RegsFsk.RegOpMode) & 0x80) == 0);
-
-                                                    if (frf != 0 || payload.Length > 0)
-                                                    {
-                                                        byte[] binData = lastData.Select(d => (byte)d).ToArray();
-                                                        bool crc8InitZero = false;
-
-                                                        if (binData.Length > 1)
-                                                        {
-                                                            byte crc = crc8(binData, 0, binData.Length - 1, 0);
-                                                            crc8InitZero = (crc == binData[binData.Length - 1]);
-                                                        }
-
-                                                        string modulationParameters = GetModulationParameters();
-
-                                                        if(lastModulationParameters != modulationParameters)
-                                                        {
-                                                            lastModulationParameters = modulationParameters;
-                                                            //Console.WriteLine("Modulation: " + modulationParameters);
-                                                        }
-
-                                                        Console.WriteLine(">  " + modulationParameters + " " + arfcn.ToString("00") + " " + miss + " " + (write ? "Tx" : "Rx") + "  " + payload + (crc8InitZero ? "  (CRC8 zero-init)":""));
-
-                                                        if (!write && !isFsk && crc8InitZero)
-                                                        {
-                                                            /* then check for a fw packet 00000101 / 00001101  */
-                                                            if ((binData[0] == 0x05) || (binData[0] == 0x0D))
-                                                            {
-                                                                byte len = binData[1];
-                                                                byte[] fwData = binData.Skip(2).Take(len).ToArray();
-
-                                                                if (fwLastCounter != binData[0])
-                                                                {
-                                                                    fwLastCounter = binData[0];
-                                                                    //Console.WriteLine("FW>  " + string.Join(" ", fwData.Select(d => d.ToString("X2"))));
-                                                                }
-                                                            }
-
-                                                        }
-                                                    }
-                                                    break;
-                                                }
-                                        }
+                                    case 5:
                                         break;
-                                    }
-
-                                case 3:
-                                    Console.WriteLine("");
-                                    Console.Write("" + (((data & 0x80) != 0) ? "W" : "R") + " " + (data & 0x7F).ToString("X2"));
-                                    break;
-
-                                case 4:
-                                    Console.WriteLine("");
-                                    Console.Write("" + data.ToString("X2"));
-                                    break;
-
-                                case 5:
-                                    {
-                                        switch (lastFskRegister)
-                                        {
-                                            case SX1272RegsFsk.RegFifo:
-                                                {
-                                                    if (LastWrittenFrequenciesBinary.Count == 0 || HopSequenceDetected == null)
-                                                    {
-                                                        break;
-                                                    }
-                                                    ulong frf = LastWrittenFrequenciesBinary.Last();
-                                                    int arfcn = FreqToArfcn(frf);
-
-                                                    if (arfcn == HopSequenceDetected[currentHop])
-                                                    {
-                                                        currentHop++;
-                                                        hopsSuccess++;
-                                                        currentHop %= HopSequenceDetected.Length;
-                                                        hopsMissing = 0;
-
-                                                    }
-                                                    else
-                                                    {
-                                                        currentHop = 0;
-                                                        hopsMissing++;
-                                                        hopsSuccess = 0;
-                                                    }
-
-                                                    if (hopsSuccess > 10)
-                                                    {
-                                                        if (write)
-                                                        {
-                                                            for (int test_value = 0; test_value < 0x100; test_value++)
-                                                            {
-                                                                int pkt_start = 0;
-                                                                int pkt_len = 12;
-                                                                byte[] buffer = lastData.Select(d => (byte)d).ToArray();
-                                                                byte initValue = (byte)(test_value + hopDownCrc[currentHop / 2]);
-
-                                                                if (crc8(buffer, 0, pkt_start + pkt_len, initValue) == buffer[pkt_start + pkt_len])
-                                                                {
-                                                                    hopDownCrc[currentHop / 2] = initValue;
-                                                                    break;
-                                                                }
-                                                            }
-                                                        }
-                                                        else
-                                                        {
-                                                            for (int test_value = 0; test_value < 0x10000; test_value++)
-                                                            {
-                                                                int pkt_start = 0;
-                                                                int pkt_len = 21;
-                                                                byte[] buffer = lastData.Select(d => (byte)d).ToArray();
-                                                                ushort initValue = (ushort)(test_value + hopUpCrc[currentHop / 2]);
-                                                                ushort pktCrc = (ushort)((buffer[pkt_start + pkt_len + 1] << 8) | buffer[pkt_start + pkt_len]);
-
-                                                                if (crc16(buffer, 0, pkt_start + pkt_len, initValue) == pktCrc)
-                                                                {
-                                                                    hopUpCrc[currentHop / 2] = initValue;
-                                                                    break;
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                break;
-                                        }
-                                        break;
-                                    }
+                                }
+                                fifoWriteLine = null;
                             }
 
-                            lastData.Clear();
+                            fifoData.Clear();
                             currentRegister = data & ~0x80U;
                             write = (data & 0x80) != 0;
 
@@ -905,7 +737,14 @@ namespace SPIlog
                                 }
                             }
 
-                            lastData.Add((ulong)data);
+                            if (currentRegister == 0)
+                            {
+                                fifoData.Add(data);
+                            }
+                            else if(write)
+                            {
+                                WriteRegister(currentRegister, data);
+                            }
 
                             switch (displayMode)
                             {
@@ -918,6 +757,58 @@ namespace SPIlog
                                         {
                                             Console.Write("W Reg: 0x" + currentRegister.ToString("X2") + " " + regName.PadRight(16) + " < " + data.ToString("X2"));
                                             Console.WriteLine();
+
+                                            if (IsLora)
+                                            {
+                                                switch ((SX1272RegsLoRa)currentRegister)
+                                                {
+                                                    case SX1272RegsLoRa.RegOpMode:
+                                                        string[] modes = { "SLEEP", "STDBY", "Frequency Synthesis TX", "Transmit", "Frequency Synthesis RX", "Receive continuous", "Receive single", "Channel Activity Detection" };
+                                                        Console.WriteLine("  => Mode " + (((data & 0x80) == 0) ? "FSK " : "LoRa"));
+                                                        Console.WriteLine("  => Mode " + modes[data & 7]);
+                                                        break;
+
+                                                    case SX1272RegsLoRa.RegFrfLsb:
+                                                        Console.WriteLine("  => Frequency " + GetFrequency() + " MHz");
+                                                        break;
+
+                                                    case SX1272RegsLoRa.RegModemConfig2:
+                                                        {
+                                                            Console.WriteLine("  => SpreadingFactor  " + (1U << (data >> 4)).ToString());
+                                                            Console.WriteLine("  => TxContinuousMode " + ((data & (1 << 3)) != 0));
+                                                            Console.WriteLine("  => AgcAutoOn        " + ((data & (1 << 2)) != 0));
+                                                            Console.WriteLine("  => SymbTimeout(9:8) " + ((data >> 0) & 3).ToString());
+                                                        }
+                                                        break;
+
+                                                    case SX1272RegsLoRa.RegModemConfig1:
+                                                        {
+                                                            Console.WriteLine("  => Bw               " + (125 * (1 << (data >> 6))).ToString() + " kHz");
+                                                            Console.WriteLine("  => CodingRate       4/" + (4 + ((data >> 6) & 7)));
+                                                            Console.WriteLine("  => ImplHdrMode      " + ((data & (1 << 2)) != 0));
+                                                            Console.WriteLine("  => PayloadCRC       " + ((data & (1 << 1)) != 0));
+                                                            Console.WriteLine("  => LowDataRateOpt   " + ((data & (1 << 0)) != 0));
+                                                        }
+                                                        break;
+                                                }
+                                            }
+                                            else
+                                            {
+                                                switch ((SX1272RegsFsk)currentRegister)
+                                                {
+                                                    case SX1272RegsFsk.RegOpMode:
+                                                        string[] modes = { "SLEEP", "STDBY", "Frequency Synthesis TX", "Transmit", "Frequency Synthesis RX", "Receive", "", "" };
+
+                                                        Console.WriteLine("  => Mode " + (((data & 0x80) == 0) ? "FSK " : "LoRa"));
+                                                        Console.WriteLine("  => Mode " + modes[data & 7]);
+                                                        break;
+
+                                                    case SX1272RegsFsk.RegFrfLsb:
+                                                        Console.WriteLine("  => Frequency " + GetFrequency() + " MHz");
+                                                        break;
+                                                }
+                                            }
+                                            break;
                                         }
                                         else
                                         {
@@ -931,14 +822,20 @@ namespace SPIlog
                                     break;
 
                                 case 3:
-                                case 4:
                                     Console.Write(" " + data.ToString("X2"));
+                                    Console.WriteLine("");
+                                    Console.Write("" + (((data & 0x80) != 0) ? "W" : "R") + " " + (data & 0x7F).ToString("X2"));
+                                    break;
+
+                                case 4:
+                                    Console.Write(" " + data.ToString("X2")); Console.WriteLine("");
+                                    Console.Write("" + data.ToString("X2"));
                                     break;
 
                                 case 5:
+
                                     if ((thisTime - lastUpdate).TotalMilliseconds > 50)
                                     {
-
                                         lastUpdate = thisTime;
                                         var frfs = LastWrittenFrequenciesBinary.Distinct().ToList();
                                         List<ulong> deltas = new List<ulong>();
@@ -1017,11 +914,91 @@ namespace SPIlog
 
                             if (write)
                             {
-                                WriteRegister(currentRegister, data);
+                                /* shared between lora and fsk */
+                                switch ((SX1272RegsFsk)currentRegister)
+                                {
+                                    case SX1272RegsFsk.RegFrfLsb:
+                                        ulong frf = (GetRegister(SX1272RegsFsk.RegFrfMsb) << 16) + (GetRegister(SX1272RegsFsk.RegFrfMid) << 8) + (GetRegister(SX1272RegsFsk.RegFrfLsb) << 0);
+                                        ulong freq = (ulong)(GetFrequency() * 1000000.0m);
+
+                                        /* delay a few ms */
+                                        if ((logReader.BaseStream is FileStream) && sleepDelay > 0)
+                                        {
+                                            Thread.Sleep(sleepDelay);
+                                        }
+
+                                        if (frf != 0)
+                                        {
+                                            int arfcn = FreqToArfcn(frf);
+
+                                            Frequencies.Add(freq);
+                                            FrequenciesBinary.Add(frf);
+                                            FrequenciesLog.Add(new Tuple<double, byte>((DateTime.Now - StartTime).TotalMilliseconds, (byte)((frf - 0xD70AB0) / 4260)));
+
+                                            if ((FrequenciesBinary.Count % 2) == 0)
+                                            {
+                                                int width = FrequenciesBinary.Count / 2;
+
+                                                var part1 = FrequenciesBinary.Take(width);
+                                                var part2 = FrequenciesBinary.Skip(width);
+
+                                                //if(Enumerable.SequenceEqual(part1, part2))
+                                                {
+                                                    //PrintStatistics();
+                                                }
+
+                                            }
+
+                                            //Console.WriteLine("  => Frequency: " + (freq / 1000) + " kHz");
+
+
+                                            LastWrittenFrequenciesBinary.Add(frf);
+
+                                            if (MinFreq != LastWrittenFrequenciesBinary.Min())
+                                            {
+                                                MinFreq = LastWrittenFrequenciesBinary.Min();
+                                                HopSequenceDetected = null;
+                                            }
+                                            if (MaxFreq != LastWrittenFrequenciesBinary.Max())
+                                            {
+                                                MaxFreq = LastWrittenFrequenciesBinary.Max();
+                                                HopSequenceDetected = null;
+                                            }
+
+                                            if (LastWrittenFrequenciesBinary.Count > 300)
+                                            {
+                                                /* if the pattern does not repeat, reset the hop list */
+                                                if (LastWrittenFrequenciesBinary.First() != LastWrittenFrequenciesBinary.Last())
+                                                {
+                                                    HopSequenceDetected = null;
+                                                }
+
+                                                /* only update the hop sequence if the current (and first) ARFCN is zero */
+                                                if (HopSequenceDetected == null && arfcn == 0)
+                                                {
+                                                    HopSequenceDetected = LastWrittenFrequenciesBinary.Take(300).Select(v => FreqToArfcn(v)).ToArray();
+                                                }
+
+                                                LastWrittenFrequenciesBinary.RemoveAt(0);
+                                            }
+                                        }
+                                        break;
+                                }
                             }
 
                             if (currentRegister != 0)
                             {
+                                lastFskRegister = (SX1272RegsFsk)0xff;
+                                lastLoRaRegister = (SX1272RegsLoRa)0xff;
+
+                                if (IsFsk())
+                                {
+                                    lastFskRegister = (SX1272RegsFsk)currentRegister;
+                                }
+                                else
+                                {
+                                    lastLoRaRegister = (SX1272RegsLoRa)currentRegister;
+                                }
                                 currentRegister++;
                             }
                         }
@@ -1029,7 +1006,7 @@ namespace SPIlog
                         {
                             Console.WriteLine("Lost a few bytes");
                             lastFskRegister = 0;
-                            lastData.Clear();
+                            fifoData.Clear();
                             logReader.ReadByte();
                         }
                     }

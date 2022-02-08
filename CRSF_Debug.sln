@@ -1,15 +1,11 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 16
-VisualStudioVersion = 16.0.31005.135
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.32112.339
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CRSF_Debug", "CRSF_Debug\CRSF_Debug.csproj", "{7CF0DE11-2C7E-421F-ACF2-EDF807124555}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SPIlog", "SPIlog\SPIlog.csproj", "{517DE142-FC87-4E09-BD61-2426CCB0C732}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CRSF_CRCTest", "CRSF_CRCTest\CRSF_CRCTest.csproj", "{FBA09D16-3379-42FC-9550-A8C64DCEBF45}"
-EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HopTest", "HopTest\HopTest.csproj", "{FC98C42F-4BB3-48A1-8540-A483FEC4B758}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -25,14 +21,6 @@ Global
 		{517DE142-FC87-4E09-BD61-2426CCB0C732}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{517DE142-FC87-4E09-BD61-2426CCB0C732}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{517DE142-FC87-4E09-BD61-2426CCB0C732}.Release|Any CPU.Build.0 = Release|Any CPU
-		{FBA09D16-3379-42FC-9550-A8C64DCEBF45}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{FBA09D16-3379-42FC-9550-A8C64DCEBF45}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{FBA09D16-3379-42FC-9550-A8C64DCEBF45}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{FBA09D16-3379-42FC-9550-A8C64DCEBF45}.Release|Any CPU.Build.0 = Release|Any CPU
-		{FC98C42F-4BB3-48A1-8540-A483FEC4B758}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{FC98C42F-4BB3-48A1-8540-A483FEC4B758}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{FC98C42F-4BB3-48A1-8540-A483FEC4B758}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{FC98C42F-4BB3-48A1-8540-A483FEC4B758}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
